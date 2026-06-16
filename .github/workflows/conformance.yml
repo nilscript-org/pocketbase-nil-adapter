@@ -1,0 +1,68 @@
+name: conformance
+
+# The conformance harness for this Official Verified Adapter. The offline proof is
+# GREEN (this adapter is filled and conformant). A kernel release that would break
+# it surfaces here as a red CI — on the adapter, not silently in the core.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      shim_url:
+        description: "Base URL of a running shim, for the opt-in LIVE gate"
+        required: false
+        default: ""
+      live_verb:
+        description: "A write verb to exercise live, e.g. commerce.create_product"
+        required: false
+        default: "commerce.create_product"
+
+jobs:
+  # Gate 1 — offline proof. Self-contained: the shim carries its own deps. GREEN.
+  offline:
+    name: offline proof (FakeSystem) — 16/16
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install the shim
+        run: pip install -e ".[dev]"
+      - name: Conformance proof — every active write verb must reach `executed`
+        run: pytest -q
+
+  # Gate 2 — manifest honesty. Needs the kernel CLI.
+  #   TODO(once the kernel is on PyPI): replace the git install with `pip install nilscript[cli]`.
+  manifest:
+    name: manifest validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install the nilscript CLI
+        run: pip install "nilscript[cli] @ git+https://github.com/nilscript-org/nilscript.git"
+      - name: Validate the requirements manifest
+        run: nilscript manifest validate requirements-manifest.json
+
+  # Gate 3 — the LIVE proof + drift guard. Opt-in via "Run workflow" with a shim_url,
+  # because it needs a running PocketBase-backed shim. conformance-test runs ONE verb
+  # per call (including its rollback-honesty rows across the three reversibility tiers).
+  live:
+    name: live conformance (opt-in)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && inputs.shim_url != ''
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install the shim and the nilscript CLI
+        run: |
+          pip install -e ".[dev]"
+          pip install "nilscript[cli] @ git+https://github.com/nilscript-org/nilscript.git"
+      - name: Live conformance for one verb (incl. its rollback-honesty tier)
+        run: nilscript conformance-test --url "${{ inputs.shim_url }}" --verb "${{ inputs.live_verb }}"
