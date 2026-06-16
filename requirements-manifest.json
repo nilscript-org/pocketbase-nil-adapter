@@ -1,0 +1,41 @@
+{
+  "manifest_version": "0.1",
+  "system": "pocketbase",
+  "nil_spec": "0.1",
+  "verbs": {
+    "commerce.create_product": {
+      "native_target": "products",
+      "reversibility": "REVERSIBLE",
+      "compensation": {
+        "verb": "commerce.delete_product",
+        "arg_map": { "product_id": "$.result.entity.id" },
+        "tier": "HIGH",
+        "window": "P30D"
+      }
+    },
+    "commerce.record_payment": {
+      "native_target": "payments",
+      "reversibility": "COMPENSABLE",
+      "compensation": {
+        "verb": "commerce.process_refund",
+        "arg_map": { "refund_target": "$.result.entity.id" },
+        "tier": "HIGH",
+        "window": "P30D"
+      }
+    },
+    "services.create_invoice": {
+      "native_target": "invoices",
+      "reversibility": "COMPENSABLE",
+      "compensation": {
+        "verb": "commerce.process_refund",
+        "arg_map": { "refund_target": "$.result.entity.id" },
+        "tier": "HIGH",
+        "window": "P30D"
+      }
+    },
+    "commerce.send_message": {
+      "native_target": "messages",
+      "reversibility": "IRREVERSIBLE"
+    }
+  }
+}
