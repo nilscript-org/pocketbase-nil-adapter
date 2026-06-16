@@ -15,7 +15,7 @@ six NIL endpoints at the edge and translates each verb into native PocketBase re
 
 - **Offline proof:** `16/16` green — every active write verb reaches `executed` against the
   in-memory `FakeSystem`, and rollback-honesty holds.
-- **Conforms to:** `nilscript >= 0.3.0` (SEQRD-PC / ROLLBACK).
+- **Conforms to:** `nilscript >= 0.2.1` (SEQRD-PC / ROLLBACK).
 
 ### Reversibility tiers (earned, not asserted)
 
