@@ -181,5 +181,9 @@ QUERY_VERBS: dict[str, QueryVerb] = {
 
 
 def entity_ref(verb: WriteVerb, created: dict[str, Any]) -> dict[str, Any]:
-    name = created.get("name", "")
-    return {"type": verb.entity_type, "id": name, "url": f"/{verb.doctype}/{name}"}
+    # The SSOT entity id MUST be PocketBase's real record key (`id`), so a compensating
+    # update/delete (ROLLBACK) targets the record itself — never the human `name` attribute,
+    # which can collide or change (e.g. a product renamed after creation). Falls back to `name`
+    # for backends whose primary key IS `name`. Matches the generic resource.* path's precedence.
+    rid = created.get("id") or created.get("name") or ""
+    return {"type": verb.entity_type, "id": rid, "url": f"/{verb.doctype}/{rid}"}
