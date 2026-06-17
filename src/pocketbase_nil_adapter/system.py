@@ -23,6 +23,12 @@ class SystemClient(Protocol):
 
     def delete(self, target: str, record_id: str) -> None: ...
 
+    def exists(self, target: str) -> bool: ...  # is this native target provisioned? (PROPOSE preflight)
+
+    def schema(self, target: str) -> list[dict[str, Any]] | None: ...  # target shape (skeleton), or None
+
+    def get(self, target: str, record_id: str) -> dict[str, Any] | None: ...  # one record (before-image)
+
 
 class PocketBaseClient:
     """PocketBase backend: every NIL entity is a collection of records.
@@ -48,13 +54,26 @@ class PocketBaseClient:
         if token:
             self._http.headers["Authorization"] = token
         elif admin_email and admin_password:
-            resp = self._http.post(
-                "/api/admins/auth-with-password",
-                json={"identity": admin_email, "password": admin_password},
-            )
-            if resp.status_code >= 400:
-                raise SystemError(f"PocketBase auth failed: {resp.text}")
-            self._http.headers["Authorization"] = resp.json()["token"]
+            self._http.headers["Authorization"] = self._authenticate(admin_email, admin_password)
+
+    def _authenticate(self, identity: str, password: str) -> str:
+        """Return a superuser auth token.
+
+        PocketBase >= 0.23 authenticates superusers via the `_superusers` auth collection;
+        the legacy `/api/admins/auth-with-password` path was removed. Try the current path
+        first and fall back to the legacy one so this client works against either server.
+        """
+        creds = {"identity": identity, "password": password}
+        for path in (
+            "/api/collections/_superusers/auth-with-password",  # PocketBase >= 0.23
+            "/api/admins/auth-with-password",                   # PocketBase < 0.23 (legacy)
+        ):
+            resp = self._http.post(path, json=creds)
+            if resp.status_code < 400:
+                return resp.json()["token"]
+            if resp.status_code != 404:  # 404 = wrong PB version; keep trying. else: real failure.
+                raise SystemError(f"PocketBase auth failed ({path}): {resp.text}")
+        raise SystemError("PocketBase auth failed: no known auth endpoint responded")
 
     def create(self, target: str, doc: dict[str, Any]) -> dict[str, Any]:
         resp = self._http.post(f"/api/collections/{target}/records", json=doc)
@@ -87,6 +106,24 @@ class PocketBaseClient:
         resp = self._http.delete(f"/api/collections/{target}/records/{record_id}")
         if resp.status_code >= 400:
             raise SystemError(f"{target}/{record_id}: {resp.text}")
+
+    def schema(self, target: str) -> list[dict[str, Any]] | None:
+        # The native target's shape (skeleton). None means not provisioned. PocketBase returns the
+        # collection definition on GET; we surface its non-system fields {name, type, required}.
+        resp = self._http.get(f"/api/collections/{target}")
+        if resp.status_code != 200:
+            return None
+        body = resp.json()
+        fields = body.get("fields") or body.get("schema") or []
+        return [{"name": f.get("name"), "type": f.get("type"), "required": bool(f.get("required"))}
+                for f in fields if not f.get("system")]
+
+    def exists(self, target: str) -> bool:
+        return self.schema(target) is not None
+
+    def get(self, target: str, record_id: str) -> dict[str, Any] | None:
+        resp = self._http.get(f"/api/collections/{target}/records/{record_id}")
+        return resp.json() if resp.status_code == 200 else None
 
 
 # Backwards-friendly alias: the scaffold refers to a generic "RealSystemClient".
@@ -125,3 +162,12 @@ class FakeSystem:
     def delete(self, target: str, record_id: str) -> None:
         rows = self.docs.get(target, [])
         self.docs[target] = [r for r in rows if r.get("name") != record_id]
+
+    def exists(self, target: str) -> bool:
+        return True  # in-memory backend is always ready (creates targets on demand)
+
+    def schema(self, target: str) -> list[dict[str, Any]] | None:
+        return []  # schemaless in-memory store — provisioned, no declared fields
+
+    def get(self, target: str, record_id: str) -> dict[str, Any] | None:
+        return next((r for r in self.docs.get(target, []) if r.get("name") == record_id), None)

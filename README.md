@@ -5,17 +5,28 @@
 
 A **conformant NIL translation shim for [PocketBase](https://pocketbase.io/)** — the official
 reference adapter for the [NIL standard](https://github.com/nilscript-org/nilscript). It speaks the
-six NIL endpoints at the edge and translates each verb into native PocketBase records.
+six NIL endpoints (+ `/nil/v0.1/describe`) at the edge and translates each verb into native
+PocketBase records.
 
 > Built from [`nil-adapter-template`](https://github.com/nilscript-org/nil-adapter-template).
 > The edge / state / models / manifest loader are the generic, unmodified kernel output; only
 > `system.py`, `translate.py`, and `compensation.py` are PocketBase-specific.
 
+## New in 0.3.0
+
+- **Skeleton discovery** — `GET /nil/v0.1/describe` reports `{system, verbs, targets:{name:{exists, fields[]}}}` by reading PocketBase collection definitions (`schema(target)`). Powers the kernel `handshake()`.
+- **Generic `resource.*` CRUD** — `create / read / update / delete` against **any** collection, with synthesized reversibility (create→delete, update→restore before-image, delete→recreate). No per-collection verb needed — e.g. *update a coupon by its code*.
+- **Identifier resolution** — `update`/`delete` accept a real record id **or** a human identifier (code/name/sku/…) resolved server-side; applies to generic and semantic verbs.
+- **PROPOSE preflight** — writing to a missing collection refuses at PROPOSE (`UPSTREAM_UNAVAILABLE`), not after COMMIT.
+- **Auth** — superusers via `/api/collections/_superusers/auth-with-password` (PocketBase ≥ 0.23) with legacy fallback; identity = email / username / record id.
+- New system-client methods: `exists(target)`, `schema(target)`, `get(target, id)`.
+
 ## Status — conformant
 
-- **Offline proof:** `16/16` green — every active write verb reaches `executed` against the
-  in-memory `FakeSystem`, and rollback-honesty holds.
-- **Conforms to:** `nilscript >= 0.3.0` (SEQRD-PC / ROLLBACK).
+- **Offline proof:** `17/17` green — every active write verb reaches `executed` against the
+  in-memory `FakeSystem`, rollback-honesty holds, and `/describe` exposes a valid skeleton.
+- **Live proof:** `nilscript conformance-test` → `11/11` incl. the mandatory `exposes_describe_skeleton`.
+- **Conforms to:** `nilscript >= 0.3.0` (SEQRD-PC / ROLLBACK / describe / resource.*).
 
 ### Reversibility tiers (earned, not asserted)
 
@@ -33,7 +44,7 @@ compensation token is refused.
 
 ```
 pip install -e ".[dev]"
-pytest                      # offline conformance proof — 16/16 green
+pytest                      # offline conformance proof — 17/17 green (incl. describe skeleton)
 python -m pocketbase_nil_adapter.run    # boot the shim (uvicorn)
 ```
 

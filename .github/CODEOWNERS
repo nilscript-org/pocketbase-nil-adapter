@@ -1,0 +1,3 @@
+# The reference adapter. Keep generic modules identical to nil-adapter-template;
+# backend specifics live only in system.py + translate.py + compensation.py.
+*                       @nilscript-org/maintainers

@@ -31,6 +31,38 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _resource_phrase(op: str, target: str, args: dict[str, Any]) -> tuple[str, str]:
+    """Bilingual preview for a generic resource.* op (no per-verb authoring)."""
+    rid = args.get("id", "")
+    data = args.get("data") or {}
+    if op == "create":
+        return f"Create {target} record {data}", f"إنشاء سجل في {target}"
+    if op == "update":
+        return f"Update {target}/{rid} → {data}", f"تحديث {target}/{rid}"
+    return f"Delete {target}/{rid}", f"حذف {target}/{rid}"
+
+
+_ID_FIELDS = ("code", "name", "slug", "title", "sku", "email")
+
+
+def _resolve_id(client: SystemClient, target: str, value: str) -> str | None:
+    """Accept a real record id OR a human identifier (code/name/…). Returns the real id, or None
+    if it can't be resolved to exactly one record — so 'update coupon RESCRUD2' works by code."""
+    if not value:
+        return None
+    if client.get(target, value) is not None:  # already a real record id
+        return value
+    for field in _ID_FIELDS:  # try resolving the value as a human identifier
+        try:
+            rows = client.list(target, {field: value})
+        except SystemError:
+            continue
+        hits = [r for r in rows if str(r.get(field, "")) == str(value)]  # exact, not substring
+        if len(hits) == 1:
+            return str(hits[0].get("id") or hits[0].get("name"))
+    return None
+
+
 class EventEmitter(Protocol):
     def emit(self, event_envelope: dict[str, Any], sequence: int) -> None: ...
 
@@ -106,12 +138,41 @@ def create_app(client: SystemClient, emitter: EventEmitter, *, bearer: str | Non
         body = env.get("body", {})
         verb_name = body.get("verb")
         args = body.get("args", {}) or {}
+        # Generic resource.* CRUD (universal): target/id/data come from args, not a per-verb doctype.
+        # Works for ANY provisioned target the skeleton exposes — no per-entity verb authoring.
+        if isinstance(verb_name, str) and verb_name.startswith("resource."):
+            op = verb_name.split(".", 1)[1]
+            if op not in ("create", "update", "delete"):
+                return _refusal(env, "UNKNOWN_VERB", f"unknown resource op: {op}")
+            target = args.get("target")
+            if not target:
+                return _refusal(env, "INVALID_ARGS", "missing required arg: target", field="target")
+            if op in ("update", "delete") and not args.get("id"):
+                return _refusal(env, "INVALID_ARGS", "missing required arg: id", field="id")
+            if op in ("create", "update") and not isinstance(args.get("data"), dict):
+                return _refusal(env, "INVALID_ARGS", "missing required arg: data", field="data")
+            if not client.exists(target):
+                return _refusal(env, "UPSTREAM_UNAVAILABLE",
+                                f"backend target '{target}' is not provisioned on this system")
+            pid = uuid4().hex[:16]
+            state.proposals[pid] = {"verb": verb_name, "args": args, "resource": True}
+            en, ar = _resource_phrase(op, target, args)
+            return _envelope("PROPOSAL", env, {
+                "outcome": "proposal", "id": pid, "verb": verb_name,
+                "tier": {"create": "MEDIUM", "update": "MEDIUM", "delete": "HIGH"}[op],
+                "preview": {"en": en, "ar": ar}, "resolved": args, "modifiable": [], "expires_at": _now()})
+
         verb = WRITE_VERBS.get(verb_name)
         if verb is None:
-            return _refusal(env, "UNSUPPORTED", f"verb not supported by this backend: {verb_name}")
+            return _refusal(env, "UNKNOWN_VERB", f"verb not supported by this backend: {verb_name}")
         missing = verb.missing(args)
         if missing:
             return _refusal(env, "INVALID_ARGS", f"missing required arg: {missing[0]}", field=missing[0])
+        # Preflight (universal): refuse honestly at PROPOSE if the native target isn't provisioned,
+        # so the agent learns now instead of a COMMIT-time failure. exists() lives in system.py.
+        if not client.exists(verb.doctype):
+            return _refusal(env, "UPSTREAM_UNAVAILABLE",
+                            f"backend target '{verb.doctype}' is not provisioned on this system")
         proposal_id = uuid4().hex[:16]
         state.proposals[proposal_id] = {"verb": verb_name, "args": args}  # NO write — dry-run only
         return _envelope(
@@ -140,6 +201,48 @@ def create_app(client: SystemClient, emitter: EventEmitter, *, bearer: str | Non
         stored = state.proposals.get(proposal_id)
         if stored is None:
             return _refusal(env, "EXPIRED", f"unknown or expired proposal: {proposal_id}")
+        if stored.get("resource"):  # generic CRUD path — dispatch by args.target, synthesize result
+            op = stored["verb"].split(".", 1)[1]
+            target = stored["args"]["target"]
+            rid = str(stored["args"].get("id", ""))
+            data = stored["args"].get("data") or {}
+            try:
+                if op == "create":
+                    created = client.create(target, data)
+                    rid = str(created.get("id") or created.get("name") or "")
+                    # reversal of a create = delete the created record (synthesized, no per-verb authoring)
+                    rev_verb, rev_args, rev = "resource.delete", {"target": target, "id": rid}, "REVERSIBLE"
+                else:  # update / delete — resolve a real id from id-or-human-identifier first
+                    resolved = _resolve_id(client, target, rid)
+                    if resolved is None:
+                        print(f"[shim] RESOURCE {op}: no record matched '{rid}' in {target}", flush=True)
+                        return _envelope("STATUS", env, {"proposal": proposal_id, "state": "failed_terminal", "replayed": False})
+                    rid = resolved
+                    before = client.get(target, rid) or {}  # before-image → reversible by restore/recreate
+                    if op == "update":
+                        client.update(target, rid, data)
+                        rev_verb, rev_args, rev = "resource.update", {"target": target, "id": rid, "data": before}, "COMPENSABLE"
+                    else:  # delete
+                        client.delete(target, rid)
+                        rev_verb, rev_args, rev = "resource.create", {"target": target, "data": before}, "COMPENSABLE"
+            except (SystemError, NotImplementedError) as exc:
+                print(f"[shim] RESOURCE WRITE FAILED {stored['verb']} -> {exc}", flush=True)
+                return _envelope("STATUS", env, {"proposal": proposal_id, "state": "failed_terminal", "replayed": False})
+            comp_block = {"reversibility": rev}
+            tok = uuid4().hex[:16]  # ROLLBACK this token to preview the synthesized reversal
+            state.compensations[tok] = {"resource": True, "rev_verb": rev_verb, "rev_args": rev_args}
+            comp_block["token"] = tok
+            result = {"claim": "success", "changed": True, "verified": True,
+                      "entity": {"type": stored["verb"], "id": rid, "url": f"/{target}/{rid}"},
+                      "ssot": {"system": SYSTEM, "read_after_write": True},
+                      "compensation": comp_block}
+            status_body = {"proposal": proposal_id, "state": "executed", "replayed": False,
+                           "compensation": comp_block, "result": result}
+            state.ledger[key] = status_body
+            state.executed.add(proposal_id)
+            emitter.emit(_envelope("EVENT", env, {"event": "executed", "severity": "info",
+                         "proposal": proposal_id, "result": result}), state.next_sequence(env.get("workspace", "")))
+            return _envelope("STATUS", env, status_body)
         verb = WRITE_VERBS[stored["verb"]]
         try:
             # to_native is inside the try so an UNFILLED stub (NotImplementedError) is a clean
@@ -150,11 +253,13 @@ def create_app(client: SystemClient, emitter: EventEmitter, *, bearer: str | Non
             # record id for update/delete is the verb's first required arg (e.g. product_id).
             action = stored["verb"].split(".")[-1]
             if action.startswith("delete_"):
-                record_id = str(stored["args"].get(verb.required[0], "")) if verb.required else ""
+                raw = str(stored["args"].get(verb.required[0], "")) if verb.required else ""
+                record_id = _resolve_id(client, verb.doctype, raw) or raw  # accept id or human identifier
                 client.delete(verb.doctype, record_id)
                 created = {"name": record_id}
             elif action.startswith("update_"):
-                record_id = str(stored["args"].get(verb.required[0], "")) if verb.required else ""
+                raw = str(stored["args"].get(verb.required[0], "")) if verb.required else ""
+                record_id = _resolve_id(client, verb.doctype, raw) or raw
                 created = client.update(verb.doctype, record_id, native)
             else:
                 created = client.create(verb.doctype, native)  # the real write
@@ -177,6 +282,7 @@ def create_app(client: SystemClient, emitter: EventEmitter, *, bearer: str | Non
             comp_block["token"] = comp_token  # token present only when actually reversible
         status_body["compensation"] = comp_block
         result["compensation"] = comp_block
+        status_body["result"] = result  # surface the SSOT entity + system-of-record to the committer
         state.ledger[key] = status_body
         state.executed.add(proposal_id)  # so GET /status reports executed, not just proposed
         sequence = state.next_sequence(env.get("workspace", ""))
@@ -194,7 +300,17 @@ def create_app(client: SystemClient, emitter: EventEmitter, *, bearer: str | Non
     def query(env: dict[str, Any] = Body(...), authorization: str | None = Header(None)) -> dict[str, Any]:
         _auth(authorization)
         body = env.get("body", {})
-        verb = QUERY_VERBS.get(body.get("verb"))
+        verb_name = body.get("verb")
+        # Generic resource.read (universal): list/inspect any target the skeleton exposes, by
+        # optional field match — lets the agent resolve human values → records/ids in realtime.
+        if verb_name == "resource.read":
+            qargs = body.get("args", {}) or {}
+            target = qargs.get("target")
+            if not target or not client.exists(target):
+                raise HTTPException(status_code=404, detail=f"unknown or unprovisioned target: {target}")
+            rows = client.list(target, qargs.get("match") or None)
+            return {"data": {"target": target, "count": len(rows), "items": rows}}
+        verb = QUERY_VERBS.get(verb_name)
         if verb is None:
             raise HTTPException(status_code=404, detail="unknown query verb")
         return {"data": verb.run(client, body.get("args", {}) or {})}  # bare { data }
@@ -225,6 +341,16 @@ def create_app(client: SystemClient, emitter: EventEmitter, *, bearer: str | Non
         committed = state.compensations.get(token)
         if committed is None:
             return _refusal(env, "COMPENSATION_EXPIRED", f"unknown or expired compensation token: {token}")
+        if committed.get("resource"):  # generic-CRUD reversal — preview the synthesized compensating verb
+            rev_verb, rev_args = committed["rev_verb"], committed["rev_args"]
+            rop = rev_verb.split(".", 1)[1]
+            pid = uuid4().hex[:16]
+            state.proposals[pid] = {"verb": rev_verb, "args": rev_args, "resource": True}
+            en, ar = _resource_phrase(rop, rev_args["target"], rev_args)
+            return _envelope("PROPOSAL", env, {
+                "outcome": "proposal", "id": pid, "verb": rev_verb,
+                "tier": {"create": "MEDIUM", "update": "MEDIUM", "delete": "HIGH"}[rop],
+                "preview": {"en": en, "ar": ar}, "resolved": rev_args, "modifiable": [], "expires_at": _now()})
         verb_name = committed["verb"]
         try:
             comp_args = compensate(verb_name, committed["result"])
@@ -253,5 +379,22 @@ def create_app(client: SystemClient, emitter: EventEmitter, *, bearer: str | Non
     @app.get("/healthz")
     def healthz() -> Response:
         return Response(status_code=200)
+
+    @app.get("/nil/v0.1/describe")
+    def describe() -> dict[str, Any]:
+        """Discovery handshake (no auth): what this adapter speaks + live readiness of each
+        native target. Lets the kernel/any client connect uniformly — reachable, conformant
+        (valid NIL shape), and which targets are provisioned — without backend-specific knowledge."""
+        names = sorted({v.doctype for v in WRITE_VERBS.values()})
+        targets: dict[str, Any] = {}
+        for t in names:
+            s = client.schema(t)  # the live skeleton: field list, or None if not provisioned
+            targets[t] = {"exists": s is not None, "fields": s or []}
+        return {
+            "nil": NIL,
+            "system": SYSTEM,
+            "verbs": sorted(WRITE_VERBS) + sorted(QUERY_VERBS),
+            "targets": targets,
+        }
 
     return app
