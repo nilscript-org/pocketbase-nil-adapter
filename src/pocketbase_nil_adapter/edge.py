@@ -157,6 +157,10 @@ def create_app(client: SystemClient, emitter: EventEmitter, *, bearer: str | Non
             pid = uuid4().hex[:16]
             state.proposals[pid] = {"verb": verb_name, "args": args, "resource": True}
             en, ar = _resource_phrase(op, target, args)
+            _rtier = {"create": "MEDIUM", "update": "MEDIUM", "delete": "HIGH"}[op]
+            emitter.emit(_envelope("EVENT", env, {"event": "proposed", "severity": "info",
+                         "proposal": pid, "verb": verb_name, "tier": _rtier,
+                         "preview": {"en": en, "ar": ar}}), state.next_sequence(env.get("workspace", "")))
             return _envelope("PROPOSAL", env, {
                 "outcome": "proposal", "id": pid, "verb": verb_name,
                 "tier": {"create": "MEDIUM", "update": "MEDIUM", "delete": "HIGH"}[op],
@@ -175,6 +179,10 @@ def create_app(client: SystemClient, emitter: EventEmitter, *, bearer: str | Non
                             f"backend target '{verb.doctype}' is not provisioned on this system")
         proposal_id = uuid4().hex[:16]
         state.proposals[proposal_id] = {"verb": verb_name, "args": args}  # NO write — dry-run only
+        # Audit: surface the INTENT (no side effect) so the control plane can show/approve it.
+        emitter.emit(_envelope("EVENT", env, {"event": "proposed", "severity": "info",
+                     "proposal": proposal_id, "verb": verb_name, "tier": verb.tier,
+                     "preview": verb.preview(args)}), state.next_sequence(env.get("workspace", "")))
         return _envelope(
             "PROPOSAL",
             env,
@@ -241,7 +249,8 @@ def create_app(client: SystemClient, emitter: EventEmitter, *, bearer: str | Non
             state.ledger[key] = status_body
             state.executed.add(proposal_id)
             emitter.emit(_envelope("EVENT", env, {"event": "executed", "severity": "info",
-                         "proposal": proposal_id, "result": result}), state.next_sequence(env.get("workspace", "")))
+                         "proposal": proposal_id, "verb": stored["verb"], "result": result}),
+                         state.next_sequence(env.get("workspace", "")))
             return _envelope("STATUS", env, status_body)
         verb = WRITE_VERBS[stored["verb"]]
         try:
@@ -290,7 +299,8 @@ def create_app(client: SystemClient, emitter: EventEmitter, *, bearer: str | Non
             _envelope(
                 "EVENT",
                 env,
-                {"event": "executed", "severity": "info", "proposal": proposal_id, "result": result},
+                {"event": "executed", "severity": "info", "proposal": proposal_id,
+                 "verb": stored["verb"], "result": result},
             ),
             sequence,
         )
