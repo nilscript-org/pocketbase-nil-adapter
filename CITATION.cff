@@ -1,0 +1,12 @@
+cff-version: 1.2.0
+message: "If you use or reference NIL / NILScript, please cite the paper below."
+title: "Unexpressible, Not Filtered: A Structural Framework for Governing AI-Agent Actions — the Network Intent Layer"
+type: software
+authors:
+  - family-names: Elkhider
+    given-names: "ElBasheir A. M."
+doi: 10.5281/zenodo.20774491
+date-released: 2026-06-20
+url: "https://doi.org/10.5281/zenodo.20774491"
+repository-code: "https://github.com/nilscript-org/pocketbase-nil-adapter"
+license: "Apache-2.0 AND CC-BY-4.0"

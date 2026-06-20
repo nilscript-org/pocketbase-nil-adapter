@@ -2,6 +2,7 @@
 
 [![conformance](https://github.com/nilscript-org/pocketbase-nil-adapter/actions/workflows/conformance.yml/badge.svg)](https://github.com/nilscript-org/pocketbase-nil-adapter/actions/workflows/conformance.yml)
 [![Official Verified Adapter](https://img.shields.io/badge/nilscript-Official%20Verified%20Adapter-2ea44f)](https://github.com/nilscript-org/nilscript)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20774491.svg)](https://doi.org/10.5281/zenodo.20774491)
 
 A **conformant NIL translation shim for [PocketBase](https://pocketbase.io/)** — the official
 reference adapter for the [NIL standard](https://github.com/nilscript-org/nilscript). It speaks the
@@ -73,3 +74,19 @@ kernel's own test suite".
 ## License
 
 Tracks the core standard — see [github.com/nilscript-org/nilscript](https://github.com/nilscript-org/nilscript).
+
+## Citation
+
+This adapter is part of the **NIL (Network Intent Layer)** framework, described in a published paper
+archived on Zenodo with a permanent DOI:
+**[10.5281/zenodo.20774491](https://doi.org/10.5281/zenodo.20774491)**.
+
+```bibtex
+@misc{elkhider2026nil,
+  title  = {Unexpressible, Not Filtered: A Structural Framework for Governing AI-Agent Actions --- the Network Intent Layer},
+  author = {Elkhider, ElBasheir A. M.},
+  year   = {2026},
+  doi    = {10.5281/zenodo.20774491},
+  url    = {https://doi.org/10.5281/zenodo.20774491}
+}
+```
