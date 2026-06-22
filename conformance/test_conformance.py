@@ -84,9 +84,27 @@ def test_describe_exposes_skeleton() -> None:
     assert all(t["exists"] for t in targets.values()), "FakeSystem targets are always provisioned"
 
 
-def test_choice_gate_refuses_unknown_value_with_candidates() -> None:
-    # The Choice Gate at PROPOSE: an unresolvable constrained value is refused WITH the live options,
-    # so the agent picks the real member and re-proposes — never a hallucinated or wrong write.
+def test_choice_gate_returns_candidates_on_ambiguous_match() -> None:
+    # The Choice Gate: a value matching several members refuses AMBIGUOUS with up to 8 candidates that
+    # obey the kernel Candidate schema ({id: str, name}) — the regression guard for the crash bug.
+    sys = FakeSystem()
+    sys.docs["countries"] = [{"id": "us1", "name": "United States", "code": "US"},
+                             {"id": "gb1", "name": "United Kingdom", "code": "GB"}]
+    sys.schemas["contacts"] = [{"name": "country", "type": "relation", "relation": "countries"}]
+    sys.create("contacts", {"name": "Badr"})
+    client = TestClient(create_app(sys, CapturingEmitter(), bearer=None), raise_server_exceptions=False)
+
+    proposed = client.post("/nil/v0.1/propose", json=_env("resource.update",
+        {"target": "contacts", "id": "Badr", "data": {"country": "United"}})).json()["body"]
+
+    assert proposed["outcome"] == "refusal" and proposed["code"] == "AMBIGUOUS"
+    assert {c["id"] for c in proposed["candidates"]} == {"us1", "gb1"}
+    sentences = pytest.importorskip("nilscript.sdk.sentences")
+    sentences.ProposalBody.model_validate(proposed)  # would have caught the candidate-schema crash
+
+
+def test_choice_gate_points_to_full_list_when_nothing_matches() -> None:
+    # 0 matches → refuse INVALID_ARGS and point the agent at the full list to query and pick from.
     sys = FakeSystem()
     sys.docs["countries"] = [{"id": "qa1", "name": "Qatar", "code": "QA"}]
     sys.schemas["contacts"] = [{"name": "country", "type": "relation", "relation": "countries"}]
@@ -96,9 +114,9 @@ def test_choice_gate_refuses_unknown_value_with_candidates() -> None:
     proposed = client.post("/nil/v0.1/propose", json=_env("resource.update",
         {"target": "contacts", "id": "Badr", "data": {"country": "Atlantis"}})).json()["body"]
 
-    assert proposed["outcome"] == "refusal" and proposed["field"] == "country"
-    assert proposed.get("candidates"), "the refusal must carry the live options"
-    assert "Qatar" in {c.get("name") for c in proposed["candidates"]}
+    assert proposed["outcome"] == "refusal" and proposed["code"] == "INVALID_ARGS"
+    assert "resource.read" in proposed["message"]
+    pytest.importorskip("nilscript.sdk.sentences").ProposalBody.model_validate(proposed)
 
 
 def test_resource_update_resolves_selection_and_relation_from_schema() -> None:
