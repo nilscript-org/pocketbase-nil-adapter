@@ -84,6 +84,23 @@ def test_describe_exposes_skeleton() -> None:
     assert all(t["exists"] for t in targets.values()), "FakeSystem targets are always provisioned"
 
 
+def test_choice_gate_refuses_unknown_value_with_candidates() -> None:
+    # The Choice Gate at PROPOSE: an unresolvable constrained value is refused WITH the live options,
+    # so the agent picks the real member and re-proposes — never a hallucinated or wrong write.
+    sys = FakeSystem()
+    sys.docs["countries"] = [{"id": "qa1", "name": "Qatar", "code": "QA"}]
+    sys.schemas["contacts"] = [{"name": "country", "type": "relation", "relation": "countries"}]
+    sys.create("contacts", {"name": "Badr"})
+    client = TestClient(create_app(sys, CapturingEmitter(), bearer=None), raise_server_exceptions=False)
+
+    proposed = client.post("/nil/v0.1/propose", json=_env("resource.update",
+        {"target": "contacts", "id": "Badr", "data": {"country": "Atlantis"}})).json()["body"]
+
+    assert proposed["outcome"] == "refusal" and proposed["field"] == "country"
+    assert proposed.get("candidates"), "the refusal must carry the live options"
+    assert "Qatar" in {c.get("name") for c in proposed["candidates"]}
+
+
 def test_resource_update_resolves_selection_and_relation_from_schema() -> None:
     # The universal resolver on PocketBase: a select value resolves to its stored key (B), a relation
     # value to the referenced record id (C) — schema-driven, no per-field declaration. The same
@@ -109,18 +126,3 @@ def test_resource_update_resolves_selection_and_relation_from_schema() -> None:
     assert rec["country"] == "qa1"        # relation value → referenced id (C)
 
 
-def test_resource_update_refuses_unknown_relation_value() -> None:
-    # Fail-closed on PB too: an unresolvable reference is terminal, never a silently-wrong write.
-    sys = FakeSystem()
-    sys.docs["countries"] = [{"id": "qa1", "name": "Qatar", "code": "QA"}]
-    sys.schemas["contacts"] = [{"name": "country", "type": "relation", "relation": "countries"}]
-    sys.create("contacts", {"name": "Badr"})
-    client = TestClient(create_app(sys, CapturingEmitter(), bearer=None), raise_server_exceptions=False)
-
-    pid = client.post("/nil/v0.1/propose", json=_env("resource.update", {"target": "contacts",
-        "id": "Badr", "data": {"country": "Atlantis"}})).json()["body"]["id"]
-    committed = client.post("/nil/v0.1/commit", json={"nil": "0.1", "grant": "g", "workspace": "w",
-        "body": {"proposal": pid, "idempotency_key": pid}}).json()["body"]
-
-    assert committed["state"] == "failed_terminal"
-    assert "country" not in (sys.get("contacts", "Badr") or {})
