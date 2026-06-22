@@ -53,6 +53,72 @@ def _verify_write(client: SystemClient, target: str, record_id: str, native: dic
     return [field for field, value in native.items() if not _field_landed(after.get(field), value)]
 
 
+def _resolve_reference(client: SystemClient, model: str, value: Any) -> Any:
+    """Resolve a human dropdown value (a relation: pointing at another collection) to the backend
+    record id the field accepts — never write raw text into a relational field. Numeric/id passes
+    through; a short alpha token tries an exact code; else a name match preferring an exact hit.
+    Zero => UNRESOLVED, many => AMBIGUOUS — both raise (honest terminal failure, no write)."""
+    v = str(value).strip()
+    if not v:
+        raise SystemError(f"empty reference for {model}")
+    candidates: list[dict[str, Any]] = []
+    if 2 <= len(v) <= 3 and v.isalpha():
+        candidates = client.search(model, [["code", "=", v.upper()]], fields=("id", "name", "code"), limit=2)
+    if not candidates:
+        candidates = client.search(model, [["name", "ilike", v]], fields=("id", "name", "code"), limit=8)
+    exact = [c for c in candidates if str(c.get("name", "")).strip().lower() == v.lower()]
+    pool = exact or candidates
+    if not pool:
+        raise SystemError(f"UNRESOLVED_REFERENCE: no {model} matches {value!r}")
+    if len(pool) > 1:
+        raise SystemError(f"AMBIGUOUS_REFERENCE: {len(pool)} {model} records match {value!r}")
+    return pool[0].get("id") or pool[0].get("name")
+
+
+def _resolve_option(options: list[dict[str, Any]], value: Any) -> Any:
+    """Resolve a human term to a selection field's stored key. Matches the key, else the label
+    (case-insensitive). Zero => UNRESOLVED, many => AMBIGUOUS — never a value outside the allowed set."""
+    v = str(value).strip()
+    if not v:
+        raise SystemError("empty selection value")
+    keys = [o.get("value") for o in options]
+    if value in keys or v in [str(k) for k in keys]:
+        return value
+    hits = [
+        o.get("value") for o in options
+        if str(o.get("label", "")).strip().lower() == v.lower()
+        or str(o.get("value", "")).strip().lower() == v.lower()
+    ]
+    if not hits:
+        raise SystemError(f"UNRESOLVED_OPTION: {value!r} not in allowed values {[str(k) for k in keys]}")
+    if len({str(h) for h in hits}) > 1:
+        raise SystemError(f"AMBIGUOUS_OPTION: {value!r} matches multiple options")
+    return hits[0]
+
+
+def _resolve_writes(client: SystemClient, doctype: str, native: dict[str, Any]) -> dict[str, Any]:
+    """Schema-driven resolution of every written field to the value the backend accepts — a selection
+    value → its stored key (B), a relation value → the referenced record id (C), each element of a
+    multi-value list resolved in turn (D). Driven by field_meta from schema(); a plain scalar passes
+    through and an already-resolved id/key resolves to itself. A schema-less backend leaves values
+    untouched. Raises on an unresolvable/ambiguous value → terminal failure, never a wrong write."""
+    meta_by_field = {f.get("name"): f for f in (client.schema(doctype) or [])}
+    resolved = dict(native)
+    for field, value in native.items():
+        if value in (None, ""):
+            continue
+        meta = meta_by_field.get(field) or {}
+        if meta.get("relation"):
+            resolved[field] = ([_resolve_reference(client, meta["relation"], v) for v in value]
+                               if isinstance(value, (list, tuple))
+                               else _resolve_reference(client, meta["relation"], value))
+        elif meta.get("options"):
+            resolved[field] = ([_resolve_option(meta["options"], v) for v in value]
+                               if isinstance(value, (list, tuple))
+                               else _resolve_option(meta["options"], value))
+    return resolved
+
+
 def _resource_phrase(op: str, target: str, args: dict[str, Any]) -> tuple[str, str]:
     """Bilingual preview for a generic resource.* op (no per-verb authoring)."""
     rid = args.get("id", "")
@@ -237,6 +303,7 @@ def create_app(client: SystemClient, emitter: EventEmitter, *, bearer: str | Non
             rid = str(stored["args"].get("id", ""))
             data = stored["args"].get("data") or {}
             try:
+                data = _resolve_writes(client, target, data)  # B/C/D resolution before any write
                 if op == "create":
                     created = client.create(target, data)
                     rid = str(created.get("id") or created.get("name") or "")
@@ -288,6 +355,7 @@ def create_app(client: SystemClient, emitter: EventEmitter, *, bearer: str | Non
             # to_native is inside the try so an UNFILLED stub (NotImplementedError) is a clean
             # terminal failure, not a 500 — the conformance proof reads it as non-conformance.
             native = overlay_requirements(stored["verb"], verb.to_native(stored["args"]))  # manifest pre-fill
+            native = _resolve_writes(client, verb.doctype, native)  # B/C/D resolution before write
             # Write-path dispatch by the standard's verb lexicon: delete_* -> DELETE, update_* ->
             # PATCH/UPDATE, everything else (create_/record_/send_/draft_/process_) -> CREATE. The
             # record id for update/delete is the verb's first required arg (e.g. product_id).
