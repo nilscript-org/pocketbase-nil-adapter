@@ -4,7 +4,12 @@
 [![Official Verified Adapter](https://img.shields.io/badge/nilscript-Official%20Verified%20Adapter-2ea44f)](https://github.com/nilscript-org/nilscript)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20774491.svg)](https://doi.org/10.5281/zenodo.20774491)
 
-A **conformant NIL translation shim for [PocketBase](https://pocketbase.io/)** — the official
+**A NIL governed-action adapter for PocketBase.** It speaks the NIL contract (propose -> approve ->
+commit, skeleton-bounded, earned reversibility): an agent proposes intent, the deterministic kernel
+is the only thing that commits, and a verb or target PocketBase never declared is unexpressible, not
+filtered.
+
+It is a **conformant NIL translation shim for [PocketBase](https://pocketbase.io/)** — the official
 reference adapter for the [NIL standard](https://github.com/nilscript-org/nilscript). It speaks the
 six NIL endpoints (+ `/nil/v0.1/describe`) at the edge and translates each verb into native
 PocketBase records.
