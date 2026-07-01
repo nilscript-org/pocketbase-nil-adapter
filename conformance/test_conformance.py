@@ -53,9 +53,14 @@ def test_rollback_honesty() -> None:
 
 @pytest.mark.parametrize("verb_name", sorted(WRITE_VERBS))
 def test_write_verb_reaches_executed(verb_name: str) -> None:
-    client = TestClient(create_app(FakeSystem(), CapturingEmitter(), bearer=None), raise_server_exceptions=False)
     verb = WRITE_VERBS[verb_name]
     args = {field: "x" for field in verb.required}  # placeholder valid-shaped args
+    # Seed any DECLARED references so the prerequisite gate (which now verifies referenced records
+    # exist at PROPOSE) is satisfied — the happy path presumes its premises are met.
+    system = FakeSystem()
+    for field_name, target in verb.references.items():
+        system.docs.setdefault(target, []).append({"id": args[field_name], "name": args[field_name], "target": target})
+    client = TestClient(create_app(system, CapturingEmitter(), bearer=None), raise_server_exceptions=False)
 
     proposed = client.post("/nil/v0.1/propose", json=_env(verb_name, args)).json()
     proposal_id = proposed.get("body", {}).get("id")
@@ -68,6 +73,28 @@ def test_write_verb_reaches_executed(verb_name: str) -> None:
     )
     state = committed.json().get("body", {}).get("state")
     assert state == "executed", f"{verb_name}: not conformant yet (state={state}) — fill translate.py"
+
+
+def test_prerequisites_refused_at_propose() -> None:
+    """A create whose declared premise is unmet is refused HONESTLY at PROPOSE — never a late commit
+    failure. Universal: driven by the verb's `required` + `references`, enforced on the generic spine.
+      - an invoice with no party_id → refused (required),
+      - an invoice referencing a non-existent client → refused (broken reference),
+      - once the client exists → it proposes.
+    """
+    system = FakeSystem()
+    client = TestClient(create_app(system, CapturingEmitter(), bearer=None), raise_server_exceptions=False)
+    mk = lambda a: client.post("/nil/v0.1/propose", json=_env("resource.create", a)).json()["body"]
+
+    no_client = mk({"target": "invoices", "amount": 10, "currency": "SAR"})
+    assert no_client["outcome"] == "refusal" and no_client["field"] == "party_id"
+
+    bad_ref = mk({"target": "invoices", "party_id": 99999, "amount": 10, "currency": "SAR"})
+    assert bad_ref["outcome"] == "refusal" and "does not exist" in bad_ref["message"]
+
+    system.docs.setdefault("clients", []).append({"id": "7", "name": "7", "target": "clients"})
+    ok = mk({"target": "invoices", "party_id": "7", "amount": 10, "currency": "SAR"})
+    assert ok["outcome"] == "proposal" and ok["tier"] == "HIGH"
 
 
 def test_describe_exposes_skeleton() -> None:
